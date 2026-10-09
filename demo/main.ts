@@ -13,4 +13,9 @@ document.fonts.load('800 100px "Albert Sans Variable"').then(() => {
     still: still.matches,
   });
   still.addEventListener("change", e => m.setStill(e.matches));
+  const btn = host.querySelector<HTMLButtonElement>(".mn-sound")!;
+  btn.addEventListener("click", () => {
+    const on = !m.sound.on; m.setSound(on);
+    btn.setAttribute("aria-pressed", String(on)); btn.textContent = on ? "Sound on" : "Sound off";
+  });
 });

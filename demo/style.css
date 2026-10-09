@@ -18,3 +18,6 @@ body { font: 500 16px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; col
 .mn-head p { margin: 0; font-size: clamp(15px, 1.1vw, 17px); }
 .mn-foot { position: absolute; z-index: 1; left: clamp(20px, 4vw, 48px); bottom: clamp(20px, 5vh, 40px); margin: 0; font-size: 13px; }
 .mn-foot a { color: inherit; }
+.mn-sound { position: absolute; z-index: 3; right: clamp(20px, 4vw, 48px); bottom: clamp(20px, 5vh, 40px); padding: 9px 14px; border: 0; border-radius: 999px; background: rgb(255 255 255 / .86); color: #0b2233; font: 600 13px/1 system-ui, sans-serif; cursor: pointer; }
+.mn-sound[aria-pressed="true"] { background: #0b2233; color: #fff; }
+.mn-sound:focus-visible { outline: 2px solid #0b2233; outline-offset: 3px; }

@@ -28,6 +28,11 @@ uploaded with mipmaps and kept as two textures, so the simulation can compare th
 - **Meniscus:** a thin line of sky where the water climbs a letter (mip 1.1 minus mip 0).
 - **Calm:** a second channel of the mask quiets the caustics behind running text, so it stays readable.
 
+**Sound** (`src/sound.ts`, off until turned on): synthesized, no samples. A drop is a bubble ringing at its Minnaert
+resonance (about 3.26 Hz·m over its radius), rising in pitch as it surfaces; a letter lands as a few bubbles and a
+splash of filtered noise; a dragged word laps the water with low noise that follows its speed; all panned to where it
+happens.
+
 Capped at 60 fps; a device that can't keep up gets fewer pixels; one still frame when motion is reduced. Without
 WebGL2 the host gets `data-gl="off"` for a CSS fallback.
 

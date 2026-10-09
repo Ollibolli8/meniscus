@@ -1,9 +1,11 @@
 import { createWater, type Paint, type Water, type WaterOptions } from "./water";
+import { createSound, type Sound } from "./sound";
 
 /**
  * One word floating in the water. Drag it and it pushes the water; let go and it glides on and settles; click it (or
  * tab to it) and type, and each new letter lands with a splash. The word is real, editable text in the page; the
- * water sees it through a mask painted from the same numbers that place it.
+ * water sees it through a mask painted from the same numbers that place it. With sound on (setSound, after a click),
+ * a drop rings where you press, a letter lands with a splash, and a dragged word laps the water (sound.ts).
  *
  *   host    the element that holds it all (the pool); elements in it marked [data-calm] get calmer light behind them
  *   canvas  fills the host, under everything
@@ -24,7 +26,7 @@ export type MeniscusOptions = {
   still?: boolean;
   water?: WaterOptions;
 };
-export type Meniscus = { water: Water | null; setStill: (on: boolean) => void; dispose: () => void };
+export type Meniscus = { water: Water | null; sound: Sound; setStill: (on: boolean) => void; setSound: (on: boolean) => void; dispose: () => void };
 
 export function createMeniscus(o: MeniscusOptions): Meniscus {
   const { host, canvas, word: el } = o;
@@ -38,6 +40,7 @@ export function createMeniscus(o: MeniscusOptions): Meniscus {
   let calm: { x: number; y: number; w: number; h: number }[] = [];
   let base = 0, sig = "", raf = 0, prev = 0, box = host.getBoundingClientRect();
   let water: Water | null = null;
+  const sound = createSound();
 
   el.style.font = `${WEIGHT} 100px/1 ${FONT}`;
   el.style.letterSpacing = `${TRACK}em`;
@@ -116,6 +119,7 @@ export function createMeniscus(o: MeniscusOptions): Meniscus {
     s.r += (lean + Math.sin(s.t * 0.9) * 0.012 - s.r) * Math.min(1, dt * 6);
     s.bob = Math.sin(s.t * 1.1) * s.size * 0.005;
     place();
+    if (sound.on) sound.wake(Math.hypot(s.vx, s.vy) / Math.max(1, box.width), s.x / Math.max(1, box.width));
   };
 
   const local = (e: PointerEvent) => ({ x: e.clientX - box.left, y: e.clientY - box.top });
@@ -146,7 +150,10 @@ export function createMeniscus(o: MeniscusOptions): Meniscus {
     drag = null;
     if (tap) { el.focus(); caretToEnd(); }          // a click without a drag: type
   };
-  const press = (e: PointerEvent) => { if (e.target !== el) { const p = local(e); water?.pointer(p.x, p.y, "down"); } };
+  const press = (e: PointerEvent) => {
+    if (e.target === el || (e.target as Element | null)?.closest?.("button, a, input")) return;
+    const p = local(e); water?.pointer(p.x, p.y, "down"); sound.drop(p.x / box.width, 0.6);
+  };
   const input = () => {
     let t = (el.textContent ?? "").replace(/\s+/g, " ");
     if (t.length > MAX) { t = t.slice(0, MAX); el.textContent = t; caretToEnd(); }
@@ -154,7 +161,7 @@ export function createMeniscus(o: MeniscusOptions): Meniscus {
     s.text = t;
     fit();
     // a letter lands: a splash at the word's end
-    if (grew) { const b = el.getBoundingClientRect(); water?.splash(b.right - box.left - s.size * 0.25, s.y, s.size * 0.5, 0.08); }
+    if (grew) { const b = el.getBoundingClientRect(), x = b.right - box.left - s.size * 0.25; water?.splash(x, s.y, s.size * 0.5, 0.08); sound.splash(x / box.width); }
     if (still) place();
   };
   const key = (e: KeyboardEvent) => { if (e.key === "Enter" || e.key === "Escape") { e.preventDefault(); el.blur(); } };
@@ -181,8 +188,9 @@ export function createMeniscus(o: MeniscusOptions): Meniscus {
   water?.play(!still);
 
   return {
-    water,
-    setStill(on) { still = on; water?.play(!on); if (on) place(); },
+    water, sound,
+    setStill(on) { still = on; water?.play(!on); if (on) { place(); sound.wake(0, 0.5); } },
+    setSound(on) { sound.enable(on); },
     dispose() {
       cancelAnimationFrame(raf);
       el.removeEventListener("pointerdown", down);
@@ -195,7 +203,7 @@ export function createMeniscus(o: MeniscusOptions): Meniscus {
       el.removeEventListener("blur", blur);
       window.removeEventListener("resize", onResize);
       document.removeEventListener("visibilitychange", onVis);
-      water?.dispose(); water = null;
+      water?.dispose(); water = null; sound.dispose();
     },
   };
 }
