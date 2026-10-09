@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Meniscus · type that floats</title>
+  <meta name="description" content="A word floating in a live pool of water: it casts its shadow on the floor and pushes a wake when you drag it. WebGL2 and GLSL, no dependencies.">
+  <meta name="theme-color" content="#6ab4ee">
+  <link rel="stylesheet" href="main.css">
+</head>
+<body>
+  <main class="mn" id="pool">
+    <canvas class="mn-water" aria-hidden="true"></canvas>
+    <span class="mn-word" contenteditable="plaintext-only" spellcheck="false" role="textbox" aria-label="The word in the water. Type to change it.">Meniscus</span>
+    <header class="mn-head" data-calm>
+      <h1>Meniscus</h1>
+      <p>Type that floats. The water climbs each letter’s edge, the floor takes its shadow, and when the word moves it pushes the water ahead of it. Drag it, or click it and type your own.</p>
+    </header>
+    <p class="mn-foot" data-calm><a href="https://github.com/Ollibolli8/meniscus">Source</a> · <a href="https://work.draindk.tech">Oliver Kure Olsen</a></p>
+  </main>
+  <script type="module" src="main.js"></script>
+</body>
+</html>

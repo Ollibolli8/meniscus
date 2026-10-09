@@ -1,0 +1,22 @@
+{
+  "name": "meniscus",
+  "version": "1.0.0",
+  "description": "Type that floats: a word in a live pool of water, with its shadow on the floor and a wake when it moves. WebGL2 and GLSL, no dependencies.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Oliver Kure Olsen (https://work.draindk.tech)",
+  "repository": "github:Ollibolli8/meniscus",
+  "keywords": ["webgl", "webgl2", "glsl", "water", "caustics", "typography", "shader", "simulation"],
+  "main": "src/meniscus.ts",
+  "files": ["src"],
+  "scripts": {
+    "build": "esbuild demo/main.ts --bundle --minify --format=esm --target=es2022 --outdir=docs --loader:.woff2=file --loader:.woff=file --asset-names=fonts/[name]-[hash] && cp demo/index.html docs/index.html",
+    "dev": "npm run build && npx --yes serve docs",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@fontsource-variable/albert-sans": "^5.3.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.0"
+  }
+}
