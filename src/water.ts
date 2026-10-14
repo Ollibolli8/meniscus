@@ -1,8 +1,16 @@
 /**
  * Meniscus: type floating in a pool of water. The water comes from the Tide case on work.draindk.tech (Oliver Kure
  * Olsen, 2026): the wave equation on a grid for the pointer's ripples, twelve wind-wave trains on top, sunlight bent
- * by the surface onto a tiled floor where it focuses into caustics (1/det of the refraction map's Jacobian), sky on
- * the slopes, glints.
+ * by the surface onto a tiled floor where it focuses into caustics (the inverse of the refraction map's Jacobian), sky
+ * on the slopes, glints.
+ *
+ * The caustics are drawn forwards: the surface is a mesh, each vertex moved to where the light through it lands on the
+ * floor, and each triangle's light is how much it shrank on the way (after Evan Wallace's WebGL Water, 2011). So light
+ * lands where it really lands, folds add up, and it is drawn once per colour: water bends red least, so red lands a
+ * little short of blue and the brightest lines carry a red and a blue edge. The floor slopes from a shallow end (top
+ * left) to a deep end (bottom right), and its depth sets everything the light does on it: sharp lines in the
+ * shallows, broad ones blurred by the sun's disc in the deep, bluer water as it deepens, tiles that converge a little
+ * (the view is from above the pool's middle), and a letter's shadow that falls further off and softer.
  *
  * The type enters as a mask, painted whenever anything in it moves (red: the letters; green: calm light behind
  * running text). The simulation reads it two ways: the water under a letter is pressed flat, and where a letter moves
@@ -14,9 +22,25 @@
  * Capped at 60 fps, fewer pixels when a device can't keep up, one still frame when motion is off.
  */
 
-const VERT = `#version 300 es
+const VERT = `
 in vec2 p; out vec2 uv;
 void main() { uv = p * 0.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }`;
+
+// The pool. Its depth is kept as the refraction's reach D, in screen heights (the floor's depth times 1 - 1/n: how far
+// light lands per unit of the surface's slope), from the shallow end (top left) to the deep end (bottom right); MID is
+// the middle, under the word. Water's index for red, green and blue light is about 1.331, 1.333 and 1.337, so the reach
+// per colour scales by (1 - 1/n) / (1 - 1/n_green). True to life (SPREAD 1) the colours land a tenth of a pixel apart,
+// so SPREAD widens the difference until the fringe shows. The slope and light maps reach MARGIN past each edge of the
+// screen, for the light that lands from outside it and the deep end's floor, which looks smaller.
+const MARGIN = 0.08;
+const POOL = `
+const float SHALLOW = 0.09, DEEP = 0.2, MID = 0.145, PERSP = 0.6, BLUR = 4.5, SPREAD = 14.0, M = ${MARGIN};
+const vec3 FOCUS = 1.0 + (vec3(0.99549, 1.0, 1.00899) - 1.0) * SPREAD;
+float depth(vec2 uv, float aspect) {
+  vec2 a = vec2(aspect, -1.0);
+  return mix(SHALLOW, DEEP, smoothstep(0.1, 0.9, dot(vec2(uv.x * aspect, uv.y - 1.0), a) / dot(a, a)));
+}
+vec2 toLight(vec2 uv) { return (uv + M) / (1.0 + 2.0 * M); }`;
 
 const PACK = `
 vec2 pack16(float v) { v = floor(clamp(v * 0.5 + 0.5, 0.0, 1.0) * 65535.0 + 0.5); float hi = floor(v / 256.0); return vec2(hi, v - hi * 256.0) / 255.0; }
@@ -62,7 +86,7 @@ void main() {
   o = wr(s);
 }`;
 
-// The ripples' slope and curvature on the grid itself, in units of screen height.
+// The ripples' slope on the grid itself.
 const RIP = `
 precision highp float;
 in vec2 uv; out vec4 o;
@@ -76,79 +100,159 @@ float h(vec2 q) {
   return v;
 }
 void main() {
-  float c = h(uv), l = h(uv - vec2(texel.x, 0.0)), r = h(uv + vec2(texel.x, 0.0)), d = h(uv - vec2(0.0, texel.y)), u = h(uv + vec2(0.0, texel.y));
+  float l = h(uv - vec2(texel.x, 0.0)), r = h(uv + vec2(texel.x, 0.0)), d = h(uv - vec2(0.0, texel.y)), u = h(uv + vec2(0.0, texel.y));
   vec2 e = vec2(texel.x * aspect, texel.y);
   vec2 g = vec2(r - l, u - d) / (2.0 * e);
-  vec2 hh = vec2((r + l - 2.0 * c) / (e.x * e.x), (u + d - 2.0 * c) / (e.y * e.y));
 #ifdef FLOAT_SIM
-  o = vec4(g, hh);
+  o = vec4(g, 0.0, 1.0);
 #else
-  o = vec4(clamp(g * 0.05 + 0.5, 0.0, 1.0), clamp(hh * 0.0012 + 0.5, 0.0, 1.0));
+  o = vec4(clamp(g * 0.05 + 0.5, 0.0, 1.0), 0.0, 1.0);
 #endif
 }`;
 
-// The whole surface: ripples (interpolated) plus wind waves (exact). Out: slope (rg) and the light focused onto the floor (b).
+// The whole surface's slope: ripples (interpolated) plus wind waves (exact), reaching M past the screen like the light.
 const SURF = `
 precision highp float;
 in vec2 uv; out vec4 o;
 uniform sampler2D rip; uniform float aspect; uniform float time; uniform vec4 wv[12]; uniform float wsp[12];
+${POOL}
 void main() {
-  vec4 r = texture(rip, uv);
+  vec2 at = uv * (1.0 + 2.0 * M) - M;
+  vec4 r = texture(rip, at);
 #ifdef FLOAT_SIM
-  vec2 g = r.xy * 1.4, hh = r.zw * 1.4;
+  vec2 g = r.xy * 1.4;
 #else
-  vec2 g = (r.xy - 0.5) / 0.05 * 1.4, hh = (r.zw - 0.5) / 0.0012 * 1.4;
+  vec2 g = (r.xy - 0.5) / 0.05 * 1.4;
 #endif
-  float hxy = 0.0;
-  vec2 p = vec2(uv.x * aspect, uv.y);
+  vec2 p = vec2(at.x * aspect, at.y);
   for (int i = 0; i < 12; i++) {
     vec4 w = wv[i];
-    float ph = dot(w.xy, p) * w.z - time * wsp[i];
-    float s = sin(ph), c = cos(ph), hk = -w.w * s * w.z * w.z;
-    g += w.w * c * w.z * w.xy;
-    hh += hk * w.xy * w.xy;
-    hxy += hk * w.x * w.y;
+    g += w.w * cos(dot(w.xy, p) * w.z - time * wsp[i]) * w.z * w.xy;
   }
-  const float D = 0.1;
-  float det = (1.0 + D * hh.x) * (1.0 + D * hh.y) - D * D * hxy * hxy;
-  float light = 1.0 / max(abs(det), 0.12);
 #ifdef FLOAT_SIM
-  o = vec4(g, light, 1.0);
+  o = vec4(g, 0.0, 1.0);
 #else
-  o = vec4(clamp(g * 0.08 + 0.5, 0.0, 1.0), clamp(light / 10.0, 0.0, 1.0), 1.0);
+  o = vec4(clamp(g * 0.08 + 0.5, 0.0, 1.0), 0.0, 1.0);
+#endif
+}`;
+
+// The sunlight on the floor, drawn forwards: the surface as a mesh of cols x rows cells reaching M past the screen,
+// each vertex moved to where the light through it lands (D times the slope, so further where the floor is deeper),
+// once per colour (the instance). A triangle's light is its area on the surface over its area on the floor (the
+// inverse of the refraction map's Jacobian), capped by the sun's disc: the deeper the floor, the wider the disc's
+// image, so the lower the cap. Added up, so overlapping folds add.
+const CAUS_VERT = `
+precision highp float;
+uniform sampler2D surf; uniform float aspect; uniform int cols; uniform vec2 cell;
+out vec2 from; out float peak; flat out int ch;
+${POOL}
+vec2 slope(vec2 q) {
+  vec4 s = textureLod(surf, q, 0.0);
+#ifdef FLOAT_SIM
+  return s.xy;
+#else
+  return (s.xy - 0.5) / 0.08;
+#endif
+}
+void main() {
+  ch = gl_InstanceID;
+  vec2 p = vec2(gl_VertexID % (cols + 1), gl_VertexID / (cols + 1)) * cell - M;
+  // Ripples finer than the sun's disc blurs on the floor don't show there, so the light follows a smoothed slope,
+  // smoother in the deep (the surface itself keeps every ripple). A smooth kernel, not a mip: a mip's bilinear kinks
+  // would show in the light as a grid.
+  float z = depth(p, aspect), deep = (z - SHALLOW) / (DEEP - SHALLOW);
+  vec2 q = toLight(p), t = (1.25 + deep) / vec2(textureSize(surf, 0));
+  vec2 g = slope(q) * 0.36 + (slope(q + t) + slope(q - t) + slope(q + vec2(t.x, -t.y)) + slope(q + vec2(-t.x, t.y))) * 0.16;
+  from = p;
+  peak = 1.0 / mix(0.12, 0.45, deep);
+  gl_Position = vec4(toLight(p + z * FOCUS[ch] * g / vec2(aspect, 1.0)) * 2.0 - 1.0, 0.0, 1.0);
+}`;
+const CAUS = `
+precision highp float;
+in vec2 from; in float peak; flat in int ch;
+out vec4 o;
+uniform vec2 size;
+${POOL}
+void main() {
+  vec2 a = dFdx(from) * size / (1.0 + 2.0 * M), b = dFdy(from) * size / (1.0 + 2.0 * M);
+  vec4 c = vec4(equal(ivec4(ch), ivec4(0, 1, 2, 3))) * min(abs(a.x * b.y - a.y * b.x), peak);
+#ifdef FLOAT_SIM
+  o = c;
+#else
+  o = c / 10.0;
 #endif
 }`;
 
 const FINAL = `
 precision highp float;
 in vec2 uv; out vec4 o;
-uniform sampler2D surf; uniform sampler2D floorTex; uniform sampler2D mask; uniform vec2 res; uniform float aspect; uniform float time;
-uniform vec2 throwTo;                          // where the type's shadow falls on the floor (uv), from the type's size
+uniform sampler2D surf; uniform sampler2D lightTex; uniform sampler2D mask; uniform vec2 res; uniform vec2 css; uniform float aspect; uniform float time;
+uniform vec2 throwTo;                          // where the type's shadow falls on the floor at the middle depth (uv), from the type's size
 const vec3 WATER = vec3(0.322, 0.682, 0.929);   // #52aeed, Tide's 17.4° water
 const vec3 SUN = vec3(1.0, 0.985, 0.94);
 const vec3 SKY = vec3(0.94, 0.975, 1.0);
+const vec3 TILE_A = vec3(0.761, 0.906, 0.988), TILE_B = vec3(0.663, 0.851, 0.969);   // #c2e7fc to #a9d9f7
+${POOL}
 float hash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+// The light on the floor, blurred by r of its texels: the middle and six taps round it, each from a mip as wide as
+// the gap between taps, so a bright point spreads into a disc rather than seven dots.
+vec3 floorLight(vec2 uv, float r) {
+  float lod = max(0.0, log2(r) - 0.5);
+  vec2 t = r * 0.75 / vec2(textureSize(lightTex, 0));
+  vec3 c = textureLod(lightTex, uv, lod).rgb;
+  for (int i = 0; i < 6; i++) {
+    float a = float(i) * 1.0472 + 0.3;
+    c += textureLod(lightTex, uv + vec2(cos(a), sin(a)) * t, lod).rgb;
+  }
+  return c / 7.0;
+}
+// How much of a pixel one set of grout lines (1.25 CSS px wide) covers: a box filter over the pixel's footprint, so the
+// lines stay clean where they converge and where the surface bends them.
+float grout(float x, float tile, float fw) {
+  float d = abs(x - tile * floor(x / tile + 0.5));
+  return clamp(min(d + fw * 0.5, 0.625) - max(d - fw * 0.5, -0.625), 0.0, fw) / fw;
+}
 void main() {
-  vec4 s = texture(surf, uv);
+  float D = depth(uv, aspect), k = D / MID;     // the floor's depth here, and relative to the middle
+  vec4 s = texture(surf, toLight(uv));
 #ifdef FLOAT_SIM
-  vec2 g = s.xy; float light = s.z;
+  vec2 g = s.xy;
 #else
-  vec2 g = (s.xy - 0.5) / 0.08; float light = s.z * 10.0;
+  vec2 g = (s.xy - 0.5) / 0.08;
 #endif
   vec3 N = normalize(vec3(-g * 0.35, 1.0));
   vec2 asp = vec2(aspect, 1.0);
-  // The floor, seen through the surface.
-  vec2 fuv = uv - g * 0.012 / asp;
-  vec3 floorC = texture(floorTex, fuv).rgb;
-  // The type's shadow on the floor (the sun is up and to the left), softer than the letter; around it, the light the
-  // letters' edges focus. Calmer light behind the running text, so it reads.
-  float sh = textureLod(mask, fuv - throwTo, 2.2).r, ring = textureLod(mask, fuv - throwTo, 3.4).r;
+  // The floor, seen through the surface from above the pool's middle: deeper floor looks a little smaller, and the
+  // surface's slope shifts it further. F is the floor point in screen heights from the middle.
+  vec2 F = (uv - 0.5) * asp * (1.0 + D * PERSP) - g * 0.012 * k;
+  vec2 fuv = F / asp + 0.5;
+  // The light there, softened more the deeper the floor.
+  vec3 light = floorLight(toLight(fuv), 1.5 + BLUR * (D - SHALLOW) / (DEEP - SHALLOW));
+#ifndef FLOAT_SIM
+  light *= 10.0;
+#endif
+  // Tide's bath floor, pale blue and faint tiles, laid in CSS px so that at the middle depth it meets the screen.
+  vec2 P = vec2(F.x, -F.y) / (1.0 + MID * PERSP) * css.y + css * 0.5;
+  vec2 ga = vec2(css.x * 0.5, css.y);
+  vec3 floorC = mix(TILE_A, TILE_B, clamp(dot(P, ga) / dot(ga, ga), 0.0, 1.0));
+  float tile = max(48.0, min(css.x, css.y) / 10.0);
+  vec2 q = P - mod(css, tile) * 0.5, fw = max(fwidth(P), vec2(1e-3));
+  floorC = mix(floorC, vec3(1.0), 0.2 * grout(q.x, tile, fw.x));
+  floorC = mix(floorC, vec3(1.0), 0.2 * grout(q.y, tile, fw.y));
+  // The type's shadow on the floor (the sun is up and to the left), softer than the letter, and further off and
+  // softer still where the floor is deeper; around it, the light the letters' edges focus. Calmer light behind the
+  // running text, so it reads.
+  vec2 at = fuv - throwTo * k;
+  float sh = textureLod(mask, at, 2.2 + log2(k)).r, ring = textureLod(mask, at, 3.4 + log2(k)).r;
   float shade = min(1.0, sh) * 0.62;
   float halo = smoothstep(0.03, 0.17, ring) * (1.0 - smoothstep(0.17, 0.45, ring)) * (1.0 - sh);
   float calm = textureLod(mask, uv, 3.5).g;
-  vec3 col = floorC * mix(vec3(1.0), WATER, 0.62);
-  float caus = smoothstep(1.1, 3.6, light) * (1.0 - calm * 0.65);
-  col += SUN * (caus * 0.4 + (light - 1.0) * 0.04) * (1.0 - min(1.0, shade * 1.6));
+  // Light that crosses more water is bluer and dimmer (Beer–Lambert): Tide's tint at the middle depth, stronger in
+  // the deep end, on the floor and on the light that reaches it.
+  vec3 tint = mix(vec3(1.0), WATER, 0.62), T = pow(tint, vec3(k * k));
+  vec3 col = floorC * T;
+  vec3 caus = smoothstep(1.1, 3.6, light) * (1.0 - calm * 0.65);
+  col += SUN * T / tint * (caus * 0.4 + (light - 1.0) * 0.04) * (1.0 - min(1.0, shade * 1.6));
   col *= 1.0 - shade * 0.42;
   col += SUN * halo * 0.3;
   // The surface: sky on steep slopes, a line of sky where the water climbs a letter, glints where a slope catches the sun.
@@ -180,8 +284,8 @@ export type Water = {
 };
 
 type Prog = { p: WebGLProgram; u: Record<string, WebGLUniformLocation | null> };
-function program(gl: WebGL2RenderingContext, frag: string, float = false): Prog {
-  frag = "#version 300 es\n" + (float ? "#define FLOAT_SIM 1\n" : "") + frag;
+function program(gl: WebGL2RenderingContext, frag: string, float = false, vert = VERT): Prog {
+  const head = "#version 300 es\n" + (float ? "#define FLOAT_SIM 1\n" : "");
   const sh = (type: number, src: string) => {
     const s = gl.createShader(type)!;
     gl.shaderSource(s, src); gl.compileShader(s);
@@ -189,7 +293,7 @@ function program(gl: WebGL2RenderingContext, frag: string, float = false): Prog 
     return s;
   };
   const p = gl.createProgram()!;
-  gl.attachShader(p, sh(gl.VERTEX_SHADER, VERT)); gl.attachShader(p, sh(gl.FRAGMENT_SHADER, frag));
+  gl.attachShader(p, sh(gl.VERTEX_SHADER, head + vert)); gl.attachShader(p, sh(gl.FRAGMENT_SHADER, head + frag));
   gl.bindAttribLocation(p, 0, "p"); gl.linkProgram(p);
   if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p) ?? "link");
   const cache: Record<string, WebGLUniformLocation | null> = {};
@@ -204,7 +308,7 @@ function target(gl: WebGL2RenderingContext, w: number, h: number, filter: number
   if (fmt === "rg32f") gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG32F, w, h, 0, gl.RG, gl.FLOAT, null);
   else if (fmt === "rgba16f") gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null);
   else gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter === gl.NEAREST ? gl.NEAREST : gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   const fb = gl.createFramebuffer()!;
   gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
@@ -226,22 +330,6 @@ const WAVES = (() => {
   return { v, sp };
 })();
 
-/** Tide's bath floor: pale blue and faint tiles. */
-function paintFloor(w: number, h: number, scale: number) {
-  const c = document.createElement("canvas");
-  c.width = Math.round(w * scale); c.height = Math.round(h * scale);
-  const g = c.getContext("2d")!;
-  g.scale(scale, scale);
-  const grd = g.createLinearGradient(0, 0, w * 0.5, h);
-  grd.addColorStop(0, "#c2e7fc"); grd.addColorStop(1, "#a9d9f7");
-  g.fillStyle = grd; g.fillRect(0, 0, w, h);
-  const tile = Math.max(48, Math.min(w, h) / 10);
-  g.strokeStyle = "rgba(255,255,255,.2)"; g.lineWidth = 1.25;
-  for (let x = (w % tile) / 2; x < w; x += tile) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x, h); g.stroke(); }
-  for (let y = (h % tile) / 2; y < h; y += tile) { g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke(); }
-  return c;
-}
-
 export type WaterOptions = {
   /** Called after each frame is drawn (a frame meter can hook in here). */
   onFrame?: (now: number) => void;
@@ -253,8 +341,11 @@ export function createWater(canvas: HTMLCanvasElement, paint: Paint, opts: Water
   if (!ctx) return null;
   const gl: WebGL2RenderingContext = ctx;
   const float = !!gl.getExtension("EXT_color_buffer_float");
-  let sim: Prog, rip: Prog, surf: Prog, fin: Prog;
-  try { sim = program(gl, SIM, float); rip = program(gl, RIP, float); surf = program(gl, SURF, float); fin = program(gl, FINAL, float); }
+  let sim: Prog, rip: Prog, surf: Prog, caus: Prog, fin: Prog;
+  try {
+    sim = program(gl, SIM, float); rip = program(gl, RIP, float); surf = program(gl, SURF, float);
+    caus = program(gl, CAUS, float, CAUS_VERT); fin = program(gl, FINAL, float);
+  }
   catch (e) { console.warn("Meniscus:", e); return null; }
   canvas.dataset.sim = float ? "float" : "packed";
 
@@ -262,7 +353,8 @@ export function createWater(canvas: HTMLCanvasElement, paint: Paint, opts: Water
   gl.bindBuffer(gl.ARRAY_BUFFER, quad);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
   gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-  const floorTex = gl.createTexture()!;
+  // the caustics' mesh: only indices (the vertex shader places each vertex from its number), in a vertex array of its own
+  const mesh = { vao: gl.createVertexArray()!, ibo: gl.createBuffer()!, cols: 1, rows: 1, n: 0 };
   // the type's mask, at twice the ripple grid; two textures, so the simulation sees how it moved since the last frame
   const maskCv = document.createElement("canvas"), mg = maskCv.getContext("2d")!;
   const masks = [gl.createTexture()!, gl.createTexture()!];
@@ -270,6 +362,12 @@ export function createWater(canvas: HTMLCanvasElement, paint: Paint, opts: Water
 
   let W = 1, H = 1, aspect = 1, dprCap = 1.75, castX = 16, castY = 24;
   let A = target(gl, 2, 2, gl.NEAREST, "rgba8"), B = target(gl, 2, 2, gl.NEAREST, "rgba8"), R = target(gl, 2, 2, gl.LINEAR, "rgba8"), S = target(gl, 2, 2, gl.LINEAR, "rgba8");
+  let L = target(gl, 2, 2, gl.LINEAR, "rgba8");
+  // The light is added up with multisampling, then resolved into L: a fold squeezes triangles thinner than a texel,
+  // and a few samples per texel turn their hit-or-miss into the right share (no speckle, no coloured grain).
+  const lightFmt = float ? gl.RGBA16F : gl.RGBA8;
+  const samples = Math.min(8, Math.max(0, ...(gl.getInternalformatParameter(gl.RENDERBUFFER, lightFmt, gl.SAMPLES) as Int32Array ?? [0])));
+  const ms = { fb: gl.createFramebuffer()!, rb: gl.createRenderbuffer()!, w: 2, h: 2 };
   const drops: number[][] = [];
   let last: { x: number; y: number; t: number } | null = null;
   let raf = 0, wanted = false, running = false, visible = true, time = 4, prev = 0;
@@ -299,9 +397,27 @@ export function createWater(canvas: HTMLCanvasElement, paint: Paint, opts: Water
     canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
     // a finer grid than Tide's (320 cells on the long side), so the water parts around a letter's strokes
     const long = 320, sw = Math.round(W >= H ? long : long * aspect), sh = Math.round(W >= H ? long / aspect : long);
-    for (const t of [A, B, R, S]) { gl.deleteTexture(t.tex); gl.deleteFramebuffer(t.fb); }
+    for (const t of [A, B, R, S, L]) { gl.deleteTexture(t.tex); gl.deleteFramebuffer(t.fb); }
     A = target(gl, sw, sh, gl.NEAREST, float ? "rg32f" : "rgba8"); B = target(gl, sw, sh, gl.NEAREST, float ? "rg32f" : "rgba8");
-    R = target(gl, sw, sh, gl.LINEAR, float ? "rgba16f" : "rgba8"); S = target(gl, sw * 2, sh * 2, gl.LINEAR, float ? "rgba16f" : "rgba8");
+    // the surface's slope and the floor's light, at twice the grid and reaching MARGIN past each edge; a mesh cell per
+    // 2x2 texels
+    const lw = Math.round(sw * 2 * (1 + 2 * MARGIN)), lh = Math.round(sh * 2 * (1 + 2 * MARGIN));
+    R = target(gl, sw, sh, gl.LINEAR, float ? "rgba16f" : "rgba8"); S = target(gl, lw, lh, gl.LINEAR, float ? "rgba16f" : "rgba8");
+    L = target(gl, lw, lh, gl.LINEAR_MIPMAP_LINEAR, float ? "rgba16f" : "rgba8");
+    if (samples) {
+      ms.w = lw; ms.h = lh;
+      gl.bindRenderbuffer(gl.RENDERBUFFER, ms.rb); gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, lightFmt, lw, lh);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, ms.fb); gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, ms.rb);
+    }
+    mesh.cols = Math.round(lw / 2); mesh.rows = Math.round(lh / 2);
+    const idx = new Uint32Array(mesh.cols * mesh.rows * 6);
+    for (let y = 0, k = 0; y < mesh.rows; y++) for (let x = 0; x < mesh.cols; x++, k += 6) {
+      const i = y * (mesh.cols + 1) + x, j = i + mesh.cols + 1;
+      idx[k] = i; idx[k + 1] = i + 1; idx[k + 2] = j; idx[k + 3] = i + 1; idx[k + 4] = j + 1; idx[k + 5] = j;
+    }
+    mesh.n = idx.length;
+    gl.bindVertexArray(mesh.vao); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, mesh.ibo); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
+    gl.bindVertexArray(null);
     zero(A); zero(B);
     maskCv.width = sw * 2; maskCv.height = sh * 2;
     for (const m of masks) {
@@ -312,21 +428,13 @@ export function createWater(canvas: HTMLCanvasElement, paint: Paint, opts: Water
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     }
     syncMask(true); prevMask = masks[cur];
-    const floor = paintFloor(W, H, Math.min(dpr, 1.5));
-    gl.bindTexture(gl.TEXTURE_2D, floorTex);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, floor);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-    gl.generateMipmap(gl.TEXTURE_2D);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.MIRRORED_REPEAT); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.MIRRORED_REPEAT);
     // three drops so a still frame isn't glassy
     for (let i = 0; i < 3; i++) drops.push([0.18 + i * 0.3, 0.25 + (i % 2) * 0.4, 0.045, 0.06]);
     for (let i = 0; i < 40; i++) step(1 / 60);
     draw();
   };
 
-  const pass = (p: Prog, t: Target | null) => {
+  const pass = (p: Prog, t: { fb: WebGLFramebuffer; w: number; h: number } | null) => {
     gl.useProgram(p.p);
     gl.bindFramebuffer(gl.FRAMEBUFFER, t ? t.fb : null);
     gl.viewport(0, 0, t ? t.w : canvas.width, t ? t.h : canvas.height);
@@ -357,9 +465,26 @@ export function createWater(canvas: HTMLCanvasElement, paint: Paint, opts: Water
     gl.uniform1f(surf.u.aspect, aspect); gl.uniform1f(surf.u.time, time);
     gl.uniform4fv(surf.u.wv, WAVES.v); gl.uniform1fv(surf.u.wsp, WAVES.sp);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    // the sunlight through it, added up on the floor, once per colour
+    pass(caus, samples ? ms : L);
+    gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);
+    bind(0, S.tex, caus.u.surf);
+    gl.uniform1f(caus.u.aspect, aspect); gl.uniform1i(caus.u.cols, mesh.cols);
+    gl.uniform2f(caus.u.cell, (1 + 2 * MARGIN) / mesh.cols, (1 + 2 * MARGIN) / mesh.rows); gl.uniform2f(caus.u.size, L.w, L.h);
+    gl.bindVertexArray(mesh.vao);
+    gl.drawElementsInstanced(gl.TRIANGLES, mesh.n, gl.UNSIGNED_INT, 0, 3);
+    gl.bindVertexArray(null);
+    gl.disable(gl.BLEND);
+    if (samples) {
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, ms.fb); gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, L.fb);
+      gl.blitFramebuffer(0, 0, L.w, L.h, 0, 0, L.w, L.h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    }
     pass(fin, null);
-    bind(0, S.tex, fin.u.surf); bind(1, floorTex, fin.u.floorTex); bind(2, masks[cur], fin.u.mask);
-    gl.uniform2f(fin.u.res, canvas.width, canvas.height); gl.uniform1f(fin.u.aspect, aspect); gl.uniform1f(fin.u.time, time);
+    bind(1, L.tex, fin.u.lightTex);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    bind(0, S.tex, fin.u.surf); bind(2, masks[cur], fin.u.mask);
+    gl.uniform2f(fin.u.res, canvas.width, canvas.height); gl.uniform2f(fin.u.css, W, H); gl.uniform1f(fin.u.aspect, aspect); gl.uniform1f(fin.u.time, time);
     gl.uniform2f(fin.u.throwTo, castX / W, -castY / H);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
