@@ -370,7 +370,7 @@ export function createWater(canvas: HTMLCanvasElement, paint: Paint, opts: Water
   const ms = { fb: gl.createFramebuffer()!, rb: gl.createRenderbuffer()!, w: 2, h: 2 };
   const drops: number[][] = [];
   let last: { x: number; y: number; t: number } | null = null;
-  let raf = 0, wanted = false, running = false, visible = true, time = 4, prev = 0;
+  let raf = 0, wanted = false, running = false, visible = true, time = 4, prev = 0, grid = 0;
 
   const zero = (t: Target) => {   // packed zero is 32768 = (128, 0)
     gl.bindFramebuffer(gl.FRAMEBUFFER, t.fb);
@@ -494,7 +494,12 @@ export function createWater(canvas: HTMLCanvasElement, paint: Paint, opts: Water
   let slow = 0;
   const frame = (now: number) => {
     raf = requestAnimationFrame(frame);
-    if (prev && now - prev < 1000 / 62) return;          // 60 fps at most
+    // 60 fps at most: on a 120 Hz screen every other refresh is skipped. The frames keep to a 16.7 ms grid and a refresh
+    // up to 3 ms early still draws: Safari's timestamps are whole milliseconds (16, 17, 17, 16…), and a cap of 1000/62
+    // skipped every 16 there (38 fps, then fewer pixels).
+    const gap = now - grid;
+    if (grid && gap < 1000 / 60 - 3) return;
+    grid = grid && gap < 1000 / 30 ? grid + 1000 / 60 : now;
     const dt = Math.min(0.05, prev ? (now - prev) / 1000 : 1 / 60);
     slow = prev && now - prev > 24 ? slow + 1 : Math.max(0, slow - 1);
     if (slow > 45 && dprCap > 1) {
@@ -509,7 +514,7 @@ export function createWater(canvas: HTMLCanvasElement, paint: Paint, opts: Water
   const sync = () => {
     const go = wanted && visible;
     if (go === running) return;
-    running = go; cancelAnimationFrame(raf); prev = 0;
+    running = go; cancelAnimationFrame(raf); prev = grid = 0;
     if (go) raf = requestAnimationFrame(frame);
   };
   // when nothing runs (motion off), a moved word still shows: one frame, on the next animation frame
