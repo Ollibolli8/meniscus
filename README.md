@@ -65,6 +65,23 @@ const meniscus = createMeniscus({
 For other type, call `createWater(canvas, paint)` from `src/water.ts` directly and paint your own mask: red for what
 floats, green for calm.
 
+### A pool on a page
+
+Pass `water: { frame }` and the pool fills only a box of a larger canvas, like a card on a page (the portfolio's
+Maquettes carousel uses it). The box is `[left, top, right, bottom]` as shares of the canvas from its top left; the
+host is then the pool's own element, so the word and the pointer are placed in it. The pool's rim shows the meniscus
+itself, a thin line of sky where the water climbs the wall, and the light the water focuses is thrown out over the page
+round it: give the page as a picture (`source`, a canvas or a decoded image the size of the canvas) and it is lit where
+the light falls, rippling with the water and fading with distance (`spill`, in pool heights; `water.setSpill(reach, ms)`
+eases it, to grow the light on arrival or draw it back in).
+
+```ts
+createMeniscus({
+  host: card, canvas: pageCanvas, word,
+  water: { frame: [0.25, 0.2, 0.75, 0.8], radius: 4, source: pagePicture, spill: 0.16 },
+});
+```
+
 ## Build the demo
 
 ```sh

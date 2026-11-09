@@ -19,6 +19,11 @@
  * grid's finest waves, which the caustics show as grain.) The floor takes each letter's shadow, ringed by the light
  * its edges focus, and the surface shows a thin line of sky where the water climbs a letter.
  *
+ * Framed (the `frame` option), the pool fills a box in a larger canvas, a card on a page: its rim shows the meniscus
+ * itself, a line of sky where the water climbs the wall, and the light it focuses is thrown out over the page round it
+ * (the `source` picture), as a lit pool throws its light onto everything near it, rippling with the water and fading
+ * with distance.
+ *
  * Capped at 60 fps, fewer pixels when a device can't keep up, one still frame when motion is off.
  */
 
@@ -188,6 +193,9 @@ precision highp float;
 in vec2 uv; out vec4 o;
 uniform sampler2D surf; uniform sampler2D lightTex; uniform sampler2D mask; uniform vec2 res; uniform vec2 css; uniform float aspect; uniform float time;
 uniform vec2 throwTo;                          // where the type's shadow falls on the floor at the middle depth (uv), from the type's size
+// Framed: the pool's box in the canvas (uv, x0 y0 x1 y1), its corner radius (pool CSS px), CSS px per canvas pixel,
+// how far its light reaches past the frame (pool heights), and the page round it.
+uniform float framed; uniform vec4 box; uniform float radius; uniform float px; uniform float spill; uniform sampler2D page;
 const vec3 WATER = vec3(0.322, 0.682, 0.929);   // #52aeed, Tide's 17.4° water
 const vec3 SUN = vec3(1.0, 0.985, 0.94);
 const vec3 SKY = vec3(0.94, 0.975, 1.0);
@@ -212,7 +220,7 @@ float grout(float x, float tile, float fw) {
   float d = abs(x - tile * floor(x / tile + 0.5));
   return clamp(min(d + fw * 0.5, 0.625) - max(d - fw * 0.5, -0.625), 0.0, fw) / fw;
 }
-void main() {
+vec3 pool(vec2 uv) {
   float D = depth(uv, aspect), k = D / MID;     // the floor's depth here, and relative to the middle
   vec4 s = texture(surf, toLight(uv));
 #ifdef FLOAT_SIM
@@ -265,7 +273,39 @@ void main() {
   // Vignette, and a little grain against banding.
   vec2 v = uv - 0.5; col *= 1.0 - dot(v, v) * 0.22;
   col += (hash(uv * res + fract(time * 7.0)) - 0.5) * 0.016;
-  o = vec4(col, 1.0);
+  return col;
+}
+// Round a framed pool: the page, lit by the light the pool throws onto it, as a lit pool throws its light onto the
+// walls round it. A point of the page gets the floor's light from further in the further out it is (thrown outwards
+// from the middle), so the net of light widens, softens and fades as it travels. It lights what is on the page (a
+// picture brightens) and the air over it a little (the dark ground glows), and fades out before the canvas's edge.
+vec3 around(vec2 cuv, vec2 puv) {
+  vec3 bg = texture(page, cuv).rgb;
+  vec2 n = puv * 2.0 - 1.0;
+  vec2 a = pow(abs(n), vec2(6.0));
+  float k = max(1.0, pow(a.x + a.y, 1.0 / 6.0));      // about 1 on the rim, more outside (round at the corners)
+  vec2 q = clamp(n / (k * k) * 0.5 + 0.5, 0.0, 1.0);
+  float d = length((puv - clamp(puv, 0.0, 1.0)) * vec2(aspect, 1.0));   // pool heights past the rim
+  vec3 l = floorLight(toLight(q), 1.5 + d * 34.0);
+#ifndef FLOAT_SIM
+  l *= 10.0;
+#endif
+  vec2 e = min(cuv, 1.0 - cuv) * css / (box.zw - box.xy);              // CSS px to the canvas's edge
+  float fall = (spill > 0.0 ? exp(-d / spill) : 0.0) / (k * k) * smoothstep(0.0, 26.0, min(e.x, e.y));
+  vec3 lit = SUN * mix(vec3(1.0), WATER, 0.45) * (smoothstep(0.9, 3.0, l) * 0.9 + 0.12) * fall;
+  return bg * (1.0 + lit * 2.5) + lit * 0.26;
+}
+void main() {
+  if (framed < 0.5) { o = vec4(pool(uv), 1.0); return; }
+  vec2 puv = (uv - box.xy) / (box.zw - box.xy);
+  // how far inside the pool's rounded rim this pixel is (CSS px, negative inside), for its edge and its meniscus
+  vec2 hp = css * 0.5, qd = abs((puv - 0.5) * css) - hp + radius;
+  float sd = length(max(qd, 0.0)) + min(max(qd.x, qd.y), 0.0) - radius;
+  vec3 col = pool(puv);
+  // the meniscus: the water climbs the wall, and the climb catches the sky in a thin bright line along the rim
+  col = mix(col, SKY, 0.5 * exp(min(sd, 0.0) / 1.4) * (1.0 - smoothstep(0.0, 1.0, sd)));
+  float inside = clamp(0.5 - sd / px, 0.0, 1.0);
+  o = vec4(mix(around(uv, puv), col, inside), 1.0);
 }`;
 
 /** Paints the type's mask (red: letters, green: calm) for a viewport (CSS px) at the canvas's resolution; false when
@@ -273,6 +313,7 @@ void main() {
 export type Paint = (g: CanvasRenderingContext2D, cw: number, ch: number, W: number, H: number) => boolean;
 export type Water = {
   resize: () => void;
+  /** The pointer at x, y: CSS px from the pool's top left (the canvas's, unless framed). */
   pointer: (x: number, y: number, kind: "move" | "down") => void;
   /** How far the type's shadow falls (CSS px, right and down); it scales with the type, not the screen. */
   shadow: (dx: number, dy: number) => void;
@@ -280,6 +321,10 @@ export type Water = {
   splash: (x: number, y: number, size: number, strength: number) => void;
   play: (on: boolean) => void;
   visible: (on: boolean) => void;
+  /** A framed pool's light over the page: its reach (as `spill`), eased there over `ms`. */
+  setSpill: (reach: number, ms?: number) => void;
+  /** A new picture of the page round a framed pool. */
+  setSource: (source: HTMLCanvasElement | HTMLImageElement | ImageBitmap) => void;
   dispose: () => void;
 };
 
@@ -330,9 +375,20 @@ const WAVES = (() => {
   return { v, sp };
 })();
 
+/** A box in the canvas, as shares of its width and height from its top left: left, top, right, bottom. */
+export type Frame = [number, number, number, number];
 export type WaterOptions = {
   /** Called after each frame is drawn (a frame meter can hook in here). */
   onFrame?: (now: number) => void;
+  /** The pool fills only this box of the canvas, a card on a page. `paint`, `pointer` and `splash` then work in the
+   *  pool's CSS px (from its top left), and the rest of the canvas shows `source`, lit by the pool's light. */
+  frame?: Frame;
+  /** The framed pool's corner radius, CSS px. */
+  radius?: number;
+  /** The page round a framed pool, drawn over the whole canvas (a canvas or a decoded picture). Black without one. */
+  source?: HTMLCanvasElement | HTMLImageElement | ImageBitmap;
+  /** How far a framed pool's light reaches over the page, in pool heights (it fades to a third in this distance). */
+  spill?: number;
 };
 
 /** The water on a canvas that fills its box. `paint` draws the type's mask (see Paint). Null without WebGL2. */
@@ -360,7 +416,23 @@ export function createWater(canvas: HTMLCanvasElement, paint: Paint, opts: Water
   const masks = [gl.createTexture()!, gl.createTexture()!];
   let cur = 0, prevMask = masks[0];
 
-  let W = 1, H = 1, aspect = 1, dprCap = 1.75, castX = 16, castY = 24;
+  // W, H: the pool's size in CSS px (the canvas's, unless framed); CW, CH: the canvas's
+  let W = 1, H = 1, CW = 1, CH = 1, aspect = 1, dprCap = 1.75, castX = 16, castY = 24;
+  const fr = opts.frame;
+  // the page round a framed pool, and how far the pool's light reaches over it (eased)
+  const page = gl.createTexture()!;
+  gl.bindTexture(gl.TEXTURE_2D, page);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 255]));
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  const setSource = (src: HTMLCanvasElement | HTMLImageElement | ImageBitmap) => {
+    gl.bindTexture(gl.TEXTURE_2D, page);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  };
+  if (opts.source) setSource(opts.source);
+  const reach = { now: fr ? opts.spill ?? 0.14 : 0, from: 0, to: 0, t0: 0, ms: 0 };
   let A = target(gl, 2, 2, gl.NEAREST, "rgba8"), B = target(gl, 2, 2, gl.NEAREST, "rgba8"), R = target(gl, 2, 2, gl.LINEAR, "rgba8"), S = target(gl, 2, 2, gl.LINEAR, "rgba8");
   let L = target(gl, 2, 2, gl.LINEAR, "rgba8");
   // The light is added up with multisampling, then resolved into L: a fold squeezes triangles thinner than a texel,
@@ -392,9 +464,10 @@ export function createWater(canvas: HTMLCanvasElement, paint: Paint, opts: Water
 
   const resize = () => {
     const rect = canvas.getBoundingClientRect();
-    W = Math.max(1, rect.width); H = Math.max(1, rect.height); aspect = W / H;
-    const dpr = Math.min(window.devicePixelRatio || 1, W * H > 1.5e6 ? 1.25 : dprCap);
-    canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+    CW = Math.max(1, rect.width); CH = Math.max(1, rect.height);
+    W = fr ? Math.max(1, CW * (fr[2] - fr[0])) : CW; H = fr ? Math.max(1, CH * (fr[3] - fr[1])) : CH; aspect = W / H;
+    const dpr = Math.min(window.devicePixelRatio || 1, CW * CH > 1.5e6 ? 1.25 : dprCap);
+    canvas.width = Math.round(CW * dpr); canvas.height = Math.round(CH * dpr);
     // a finer grid than Tide's (320 cells on the long side), so the water parts around a letter's strokes
     const long = 320, sw = Math.round(W >= H ? long : long * aspect), sh = Math.round(W >= H ? long / aspect : long);
     for (const t of [A, B, R, S, L]) { gl.deleteTexture(t.tex); gl.deleteFramebuffer(t.fb); }
@@ -483,9 +556,21 @@ export function createWater(canvas: HTMLCanvasElement, paint: Paint, opts: Water
     pass(fin, null);
     bind(1, L.tex, fin.u.lightTex);
     gl.generateMipmap(gl.TEXTURE_2D);
-    bind(0, S.tex, fin.u.surf); bind(2, masks[cur], fin.u.mask);
-    gl.uniform2f(fin.u.res, canvas.width, canvas.height); gl.uniform2f(fin.u.css, W, H); gl.uniform1f(fin.u.aspect, aspect); gl.uniform1f(fin.u.time, time);
+    bind(0, S.tex, fin.u.surf); bind(2, masks[cur], fin.u.mask); bind(3, page, fin.u.page);
+    const k = canvas.width / CW;
+    gl.uniform2f(fin.u.res, W * k, H * k); gl.uniform2f(fin.u.css, W, H); gl.uniform1f(fin.u.aspect, aspect); gl.uniform1f(fin.u.time, time);
     gl.uniform2f(fin.u.throwTo, castX / W, -castY / H);
+    gl.uniform1f(fin.u.framed, fr ? 1 : 0);
+    if (fr) {
+      gl.uniform4f(fin.u.box, fr[0], 1 - fr[3], fr[2], 1 - fr[1]);
+      gl.uniform1f(fin.u.radius, Math.min(opts.radius ?? 0, W / 2, H / 2)); gl.uniform1f(fin.u.px, 1 / k);
+      if (reach.ms) {
+        const x = Math.min(1, (performance.now() - reach.t0) / reach.ms);
+        reach.now = reach.from + (reach.to - reach.from) * (x < 0.5 ? 2 * x * x : 1 - 2 * (1 - x) * (1 - x));
+        if (x >= 1) reach.ms = 0;
+      }
+      gl.uniform1f(fin.u.spill, reach.now);
+    }
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 
@@ -504,8 +589,8 @@ export function createWater(canvas: HTMLCanvasElement, paint: Paint, opts: Water
     slow = prev && now - prev > 24 ? slow + 1 : Math.max(0, slow - 1);
     if (slow > 45 && dprCap > 1) {
       slow = 0; dprCap = Math.max(1, dprCap * 0.8);
-      const dpr = Math.min(window.devicePixelRatio || 1, W * H > 1.5e6 ? 1.25 : dprCap);
-      canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+      const dpr = Math.min(window.devicePixelRatio || 1, CW * CH > 1.5e6 ? 1.25 : dprCap);
+      canvas.width = Math.round(CW * dpr); canvas.height = Math.round(CH * dpr);
     }
     prev = now; time += dt;
     step(dt); draw();
@@ -545,6 +630,11 @@ export function createWater(canvas: HTMLCanvasElement, paint: Paint, opts: Water
     splash(x, y, size, strength) { if (running) drops.push([x / W, 1 - y / H, size / H, strength]); else redraw(); },
     play(on) { wanted = on; sync(); if (!on) redraw(); },
     visible(on) { if (on === visible) return; visible = on; sync(); if (on) redraw(); },
-    dispose() { cancelAnimationFrame(raf); cancelAnimationFrame(pending); canvas.removeEventListener("webglcontextlost", lost); gl.getExtension("WEBGL_lose_context")?.loseContext(); },
+    setSpill(to, ms = 0) {
+      if (!running || ms <= 0) { reach.now = to; reach.ms = 0; redraw(); return; }
+      Object.assign(reach, { from: reach.now, to, t0: performance.now(), ms });
+    },
+    setSource(src) { setSource(src); redraw(); },
+    dispose() { cancelAnimationFrame(raf); cancelAnimationFrame(pending); canvas.removeEventListener("webglcontextlost", lost); gl.deleteTexture(page); gl.getExtension("WEBGL_lose_context")?.loseContext(); },
   };
 }

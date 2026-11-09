@@ -122,7 +122,8 @@ export function createMeniscus(o: MeniscusOptions): Meniscus {
     if (sound.on) sound.wake(Math.hypot(s.vx, s.vy) / Math.max(1, box.width), s.x / Math.max(1, box.width));
   };
 
-  const local = (e: PointerEvent) => ({ x: e.clientX - box.left, y: e.clientY - box.top });
+  // where the pool is now (a pool in a page that scrolls moves under a still pointer)
+  const local = (e: PointerEvent) => { const b = host.getBoundingClientRect(); return { x: e.clientX - b.left, y: e.clientY - b.top }; };
   const down = (e: PointerEvent) => {
     if (e.button !== 0 || document.activeElement === el) return;
     const p = local(e);
@@ -161,7 +162,7 @@ export function createMeniscus(o: MeniscusOptions): Meniscus {
     s.text = t;
     fit();
     // a letter lands: a splash at the word's end
-    if (grew) { const b = el.getBoundingClientRect(), x = b.right - box.left - s.size * 0.25; water?.splash(x, s.y, s.size * 0.5, 0.08); sound.splash(x / box.width); }
+    if (grew) { const b = el.getBoundingClientRect(), x = b.right - host.getBoundingClientRect().left - s.size * 0.25; water?.splash(x, s.y, s.size * 0.5, 0.08); sound.splash(x / box.width); }
     if (still) place();
   };
   const key = (e: KeyboardEvent) => { if (e.key === "Enter" || e.key === "Escape") { e.preventDefault(); el.blur(); } };
